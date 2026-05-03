@@ -1,0 +1,551 @@
+//back end
+
+<?php
+
+namespace App\Livewire\Pages\Admin\Garment;
+
+use App\Models\Category;
+use App\Models\Color;
+use App\Models\Fabric;
+use App\Models\FabricColor;
+use App\Models\Garment;
+use App\Models\GarmentColorFabric;
+use App\Models\MeasurementField;
+use App\Models\MeasurementTemplate;
+use App\Models\MeasurementValue;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use Livewire\Attributes\Layout;
+use Livewire\Attributes\Computed;
+use Livewire\Component;
+use Livewire\WithFileUploads;
+
+class EditGarment extends Component
+{
+    use WithFileUploads;
+
+    #[Layout('components.layouts.admin')]
+
+    public Garment $garment;
+    public string $name = '';
+    public string $slug = '';
+    public string $description = '';
+    public ?int $category_id = null;
+    public ?int $measurement_template_id = null;
+    public ?float $base_price = null;
+    public $image;
+    public array $fabricColorRows = [];
+    public array $values = [];
+
+    public function mount($id)
+    {
+        $this->garment = Garment::with([
+            'garmentColorFabrics.fabricColor.fabric',
+            'garmentColorFabrics.fabricColor.color',
+            // 'measurementTemplate.measurementFields.measurementValue',
+        ])->findOrFail($id);
+
+        $this->name = $this->garment->name;
+        $this->slug = $this->garment->slug;
+        $this->description = $this->garment->description;
+        $this->category_id = $this->garment->category_id;
+        $this->measurement_template_id = optional($this->garment->measurementTemplate)->id;
+        $this->base_price = $this->garment->base_price;
+
+        $rows = [];
+
+        foreach ($this->garment->garmentColorFabrics as $item) {
+            if (! $item->fabricColor?->fabric || ! $item->fabricColor?->color) {
+                continue;
+            }
+
+            $fabricName = Str::of($item->fabricColor->fabric->name)->title()->__toString();
+            $colorName = Str::of($item->fabricColor->color->color_name)->title()->__toString();
+
+            if ($fabricName === '' || $colorName === '') {
+                continue;
+            }
+
+            if (! isset($rows[$fabricName])) {
+                $rows[$fabricName] = [
+                    'fabric_name' => $fabricName,
+                    'colors' => [],
+                ];
+            }
+
+            $rows[$fabricName]['colors'][] = $colorName;
+        }
+
+        $this->fabricColorRows = collect($rows)
+            ->map(fn ($row) => [
+                'fabric_name' => $row['fabric_name'],
+                'colors' => collect($row['colors'])->unique()->values()->all(),
+            ])
+            ->values()
+            ->all();
+
+        if (empty($this->fabricColorRows)) {
+            $this->addFabricColorRow();
+        }
+
+        foreach ($this->measurementFields() as $field) {
+            $this->values[$field->id] = $field->measurementValue?->value;
+        }
+    }
+
+    #[Computed()]
+    public function categories()
+    {
+        return Category::query()
+            ->select('id', 'cat_name')
+            ->get();
+    }
+
+    #[Computed()]
+    public function fabrics()
+    {
+        return Fabric::query()
+            ->select('id', 'name')
+            ->get();
+    }
+
+    #[Computed()]
+    public function colors()
+    {
+        return Color::query()
+            ->select('id', 'color_name')
+            ->get();
+    }
+
+    #[Computed()]
+    public function measurementTemplates()
+    {
+        return MeasurementTemplate::query()
+            ->select('id', 'name')
+            ->get();
+    }
+
+    #[Computed()]
+    public function measurementFields()
+    {
+        if (! $this->measurement_template_id) {
+            return collect();
+        }
+
+        return MeasurementField::query()
+            ->where('measurement_template_id', $this->measurement_template_id)
+            ->get();
+    }
+
+    public function updatedName($value)
+    {
+        if (! $this->slug || $this->slug === Str::slug($this->name)) {
+            $this->slug = $this->generateUniqueSlug($value, $this->garment->id);
+        }
+    }
+
+    public function addFabricColorRow()
+    {
+        $this->fabricColorRows[] = [
+            'fabric_name' => '',
+            'colors' => [''],
+        ];
+    }
+
+    public function removeFabricColorRow($index)
+    {
+        unset($this->fabricColorRows[$index]);
+        $this->fabricColorRows = array_values($this->fabricColorRows);
+    }
+
+    public function addFabricColorInput($rowIndex)
+    {
+        if (! isset($this->fabricColorRows[$rowIndex])) {
+            return;
+        }
+
+        $this->fabricColorRows[$rowIndex]['colors'][] = '';
+    }
+
+    public function removeFabricColorInput($rowIndex, $colorIndex)
+    {
+        if (! isset($this->fabricColorRows[$rowIndex]['colors'][$colorIndex])) {
+            return;
+        }
+
+        unset($this->fabricColorRows[$rowIndex]['colors'][$colorIndex]);
+        $this->fabricColorRows[$rowIndex]['colors'] = array_values($this->fabricColorRows[$rowIndex]['colors']);
+    }
+
+    public function updatedMeasurementTemplateId($value)
+    {
+        $this->values = [];
+
+        foreach ($this->measurementFields() as $field) {
+            $this->values[$field->id] = $field->measurementValue?->value;
+        }
+    }
+
+    public function rules()
+    {
+        return [
+            'name' => 'required|string|max:255',
+            'slug' => 'required|string|max:255|unique:garments,slug,' . $this->garment->id,
+            'description' => 'nullable|string|min:10|max:255',
+            'category_id' => 'required|exists:categories,id',
+            'measurement_template_id' => 'nullable|exists:measurement_templates,id',
+            'fabricColorRows' => 'required|array|min:1',
+            'fabricColorRows.*.fabric_name' => 'required|string|max:255',
+            'fabricColorRows.*.colors' => 'required|array|min:1',
+            'fabricColorRows.*.colors.*' => 'required|string|max:255',
+            'values' => 'array',
+            'values.*' => 'nullable|numeric',
+            'base_price' => 'required|numeric|min:0',
+            'image' => 'nullable|image|max:2048',
+        ];
+    }
+
+    public function messages()
+    {
+        return [
+            'name.required' => 'Garment name is required',
+            'name.string' => 'Garment name must be a string',
+            'name.max' => 'Garment name must not exceed 255 characters',
+
+            'slug.required' => 'Garment slug is required',
+            'slug.string' => 'Garment slug must be a string',
+            'slug.max' => 'Garment slug must not exceed 255 characters',
+            'slug.unique' => 'Garment slug must be unique',
+
+            'description.string' => 'Garment description must be a string',
+            'description.min' => 'Garment description must be at least 10 characters',
+            'description.max' => 'Garment description must not exceed 255 characters',
+
+            'category_id.required' => 'Category is required',
+            'category_id.exists' => 'Selected category does not exist',
+
+            'measurement_template_id.exists' => 'Selected measurement template does not exist',
+
+            'fabricColorRows.required' => 'Enter at least one fabric/color row',
+            'fabricColorRows.array' => 'Fabric/color rows must be valid',
+            'fabricColorRows.*.fabric_name.required' => 'Fabric name is required',
+            'fabricColorRows.*.fabric_name.max' => 'Fabric name cannot exceed 255 characters',
+            'fabricColorRows.*.colors.required' => 'At least one color is required for each fabric',
+            'fabricColorRows.*.colors.array' => 'Fabric colors must be a list',
+            'fabricColorRows.*.colors.*.required' => 'Each color is required',
+            'fabricColorRows.*.colors.*.max' => 'Color name cannot exceed 255 characters',
+
+            'values.*.numeric' => 'Measurement values must be numeric',
+
+            'base_price.required' => 'Base price is required',
+            'base_price.numeric' => 'Base price must be numeric',
+            'base_price.min' => 'Base price must be at least 0',
+
+            'image.image' => 'Image must be an image',
+            'image.max' => 'Image must not exceed 2048 kilobytes',
+        ];
+    }
+
+    public function save()
+    {
+        $this->validate();
+
+        $this->name = Str::of($this->name)->trim()->title();
+        $this->slug = $this->generateUniqueSlug($this->name, $this->garment->id);
+        $this->description = trim($this->description);
+        $this->base_price = floatval($this->base_price);
+
+        $fabricColorRows = collect($this->fabricColorRows)
+            ->map(fn ($row) => [
+                'fabric_name' => Str::of($row['fabric_name'] ?? '')->trim()->title(),
+                'colors' => collect($row['colors'] ?? [])->map(fn ($color) => Str::of($color)->trim()->title())->filter()->unique()->values()->all(),
+            ])
+            ->filter(fn ($row) => $row['fabric_name'] !== '' && count($row['colors']) > 0)
+            ->values();
+
+        if ($fabricColorRows->isEmpty()) {
+            $this->addError('fabricColorRows', 'Enter at least one fabric/color row.');
+            return;
+        }
+
+        $fabricColorIds = $fabricColorRows->flatMap(function ($row) {
+            $fabric = Fabric::firstOrCreate(['name' => $row['fabric_name']]);
+
+            return collect($row['colors'])->map(function ($colorName) use ($fabric) {
+                $color = Color::firstOrCreate(['color_name' => $colorName]);
+
+                return FabricColor::firstOrCreate([
+                    'fabric_id' => $fabric->id,
+                    'color_id' => $color->id,
+                ])->id;
+            });
+        })->unique()->values();
+
+        DB::transaction(function () use ($fabricColorIds) {
+            $imagePath = $this->image ? $this->image->store('garments', 'public') : $this->garment->image;
+
+            $this->garment->update([
+                'name' => $this->name,
+                'slug' => $this->slug,
+                'description' => $this->description,
+                'category_id' => $this->category_id,
+                'base_price' => $this->base_price,
+                'image' => $imagePath,
+            ]);
+
+            $originalTemplate = $this->garment->measurementTemplate;
+
+            if ($originalTemplate && $originalTemplate->id !== $this->measurement_template_id) {
+                $originalTemplate->update(['garment_id' => null]);
+            }
+
+            if ($this->measurement_template_id) {
+                $template = MeasurementTemplate::query()
+                    ->whereKey($this->measurement_template_id)
+                    ->first();
+
+                if ($template) {
+                    $template->update(['garment_id' => $this->garment->id]);
+                }
+            }
+
+            $this->garment->garmentColorFabrics()->delete();
+
+            foreach ($fabricColorIds as $fabricColorId) {
+                GarmentColorFabric::create([
+                    'garment_id' => $this->garment->id,
+                    'fabric_color_id' => $fabricColorId,
+                ]);
+            }
+
+            foreach ($this->measurementFields() as $field) {
+                if (! array_key_exists($field->id, $this->values)) {
+                    continue;
+                }
+
+                $value = $this->values[$field->id];
+
+                if ($value === null || $value === '') {
+                    continue;
+                }
+
+                MeasurementValue::updateOrCreate([
+                    'measurement_field_id' => $field->id,
+                ], [
+                    'value' => floatval($value),
+                ]);
+            }
+        });
+
+        session()->flash('success', 'Garment updated successfully!');
+
+        return redirect()->route('admin.garment.view');
+    }
+
+    protected function generateUniqueSlug(string $name, ?int $exceptId = null): string
+    {
+        $slug = Str::slug($name);
+        $original = $slug;
+        $count = 1;
+
+        while (Garment::query()
+            ->when($exceptId, fn ($query) => $query->where('id', '!=', $exceptId))
+            ->where('slug', $slug)
+            ->exists()) {
+            $slug = $original . '-' . $count++;
+        }
+
+        return $slug;
+    }
+
+    public function render()
+    {
+        return view('livewire.pages.admin.garment.edit-garment');
+    }
+}
+
+
+front-end
+
+<div>
+  @if(session()->has('success'))
+    <div class="alert alert-success mb-6">
+      <span class="text-green-500 border-green-200 bg-green-100 px-4 py-3 rounded-lg inline-block">{{ session()->get('success') }}</span>
+    </div>
+  @endif
+
+  <div class="max-w-[85rem] px-4 py-10 sm:px-6 lg:px-8 lg:py-14 mx-auto">
+    <div class="mx-auto max-w-3xl">
+      <div class="text-center mb-10">
+        <h2 class="text-2xl text-foreground font-bold sm:text-4xl">Edit Garment</h2>
+      </div>
+
+      <div class="p-4 bg-card border border-card-line rounded-xl sm:p-10">
+        <form wire:submit.prevent="save">
+          <div class="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label class="block mb-2 text-sm font-medium text-foreground">Garment Name</label>
+              <input wire:model="name" type="text"
+                class="py-2.5 sm:py-3 px-4 block w-full bg-layer border-layer-line rounded-lg sm:text-sm text-foreground placeholder:text-muted-foreground-1 focus:border-primary-focus focus:ring-primary-focus"
+                placeholder="Garment name">
+              @error('name')<span class="text-sm text-red-500">{{ $message }}</span>@enderror
+            </div>
+
+            <div>
+              <label class="block mb-2 text-sm font-medium text-foreground">Slug</label>
+              <input wire:model="slug" type="text"
+                class="py-2.5 sm:py-3 px-4 block w-full bg-layer border-layer-line rounded-lg sm:text-sm text-foreground placeholder:text-muted-foreground-1 focus:border-primary-focus focus:ring-primary-focus"
+                placeholder="slug">
+              @error('slug')<span class="text-sm text-red-500">{{ $message }}</span>@enderror
+            </div>
+
+            <div>
+              <label class="block mb-2 text-sm font-medium text-foreground">Category</label>
+              <select wire:model="category_id"
+                class="py-3 px-4 block w-full bg-layer border-layer-line rounded-lg text-sm text-foreground focus:border-primary-focus focus:ring-primary-focus">
+                <option value="" disabled>Select a category</option>
+                @foreach($this->categories() as $category)
+                  <option value="{{ $category->id }}">{{ $category->cat_name }}</option>
+                @endforeach
+              </select>
+              @error('category_id')<span class="text-sm text-red-500">{{ $message }}</span>@enderror
+            </div>
+
+            <div>
+              <label class="block mb-2 text-sm font-medium text-foreground">Measurement Template</label>
+              <select wire:model="measurement_template_id"
+                class="py-3 px-4 block w-full bg-layer border-layer-line rounded-lg text-sm text-foreground focus:border-primary-focus focus:ring-primary-focus">
+                <option value="" disabled>Select a measurement template</option>
+                @foreach($this->measurementTemplates() as $template)
+                  <option value="{{ $template->id }}">{{ $template->name }}</option>
+                @endforeach
+              </select>
+              @error('measurement_template_id')<span class="text-sm text-red-500">{{ $message }}</span>@enderror
+            </div>
+
+            <div>
+              <label class="block mb-2 text-sm font-medium text-foreground">Base Price</label>
+              <div class="relative">
+                <input wire:model="base_price" type="text"
+                  class="py-2.5 sm:py-3 px-4 ps-9 pe-16 block w-full bg-layer border-layer-line rounded-lg sm:text-sm text-foreground placeholder:text-muted-foreground-1 focus:border-primary-focus focus:ring-primary-focus"
+                  placeholder="0.00">
+                <div class="absolute inset-y-0 start-0 flex items-center ps-4 pointer-events-none text-muted-foreground-1">₱</div>
+                <div class="absolute inset-y-0 end-0 flex items-center pe-4 pointer-events-none text-muted-foreground-1">PESO</div>
+              </div>
+              @error('base_price')<span class="text-sm text-red-500">{{ $message }}</span>@enderror
+            </div>
+
+            <div class="sm:col-span-2">
+              <label class="block mb-2 text-sm font-medium text-foreground">Image</label>
+              <input wire:model="image" type="file"
+                class="w-full text-sm text-foreground file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-primary file:text-primary-foreground hover:file:bg-primary-hover" />
+              @error('image')<span class="text-sm text-red-500">{{ $message }}</span>@enderror
+            </div>
+          </div>
+
+          <div class="mt-6 p-4 bg-layer border border-layer-line rounded-xl">
+            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+              <div>
+                <label class="block mb-2 text-sm font-medium text-foreground">Fabric & Color combinations</label>
+                <p class="text-sm text-muted-foreground-1">Add one or more fabric/color relationship rows for this garment.</p>
+              </div>
+              <button type="button" wire:click="addFabricColorRow"
+                class="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary-hover focus:outline-none focus:ring-2 focus:ring-primary-focus">
+                Add row
+              </button>
+            </div>
+
+            <div class="space-y-6">
+              @foreach($fabricColorRows as $index => $row)
+                <div class="space-y-4 p-4 border border-layer-line rounded-xl bg-muted/5">
+                  <div class="grid gap-4 sm:grid-cols-2 items-end">
+                    <div>
+                      <label class="block mb-2 text-sm font-medium text-foreground">Fabric</label>
+                      <input wire:model="fabricColorRows.{{ $index }}.fabric_name" type="text"
+                        class="py-2.5 sm:py-3 px-4 block w-full bg-layer border-layer-line rounded-lg text-sm text-foreground placeholder:text-muted-foreground-1 focus:border-primary-focus focus:ring-primary-focus"
+                        placeholder="e.g. Silk">
+                      @error("fabricColorRows.{$index}.fabric_name")<span class="text-sm text-red-500">{{ $message }}</span>@enderror
+                    </div>
+
+                    <div class="text-right">
+                      <button type="button" wire:click="removeFabricColorRow({{ $index }})"
+                        class="inline-flex items-center justify-center rounded-lg border border-layer-line bg-layer px-4 py-2 text-sm font-medium text-foreground hover:bg-muted-foreground/10 focus:outline-none focus:ring-2 focus:ring-primary-focus">
+                        Remove fabric
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="space-y-3">
+                    <div class="flex items-center justify-between gap-4">
+                      <div>
+                        <label class="block mb-2 text-sm font-medium text-foreground">Colors</label>
+                        <p class="text-sm text-muted-foreground-1">Add one or more colors for this fabric.</p>
+                      </div>
+                      <button type="button" wire:click="addFabricColorInput({{ $index }})"
+                        class="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary-hover focus:outline-none focus:ring-2 focus:ring-primary-focus">
+                        Add color
+                      </button>
+                    </div>
+
+                    <div class="space-y-3">
+                      @foreach($row['colors'] as $colorIndex => $colorName)
+                        <div class="grid gap-4 sm:grid-cols-2 items-end">
+                          <div>
+                            <input wire:model="fabricColorRows.{{ $index }}.colors.{{ $colorIndex }}" type="text"
+                              class="py-2.5 sm:py-3 px-4 block w-full bg-layer border-layer-line rounded-lg text-sm text-foreground placeholder:text-muted-foreground-1 focus:border-primary-focus focus:ring-primary-focus"
+                              placeholder="e.g. Green">
+                            @error("fabricColorRows.{$index}.colors.{$colorIndex}")<span class="text-sm text-red-500">{{ $message }}</span>@enderror
+                          </div>
+                          <div class="text-right">
+                            <button type="button" wire:click="removeFabricColorInput({{ $index }}, {{ $colorIndex }})"
+                              class="inline-flex items-center justify-center rounded-lg border border-layer-line bg-layer px-4 py-2 text-sm font-medium text-foreground hover:bg-muted-foreground/10 focus:outline-none focus:ring-2 focus:ring-primary-focus">
+                              Remove color
+                            </button>
+                          </div>
+                        </div>
+                      @endforeach
+                    </div>
+                  </div>
+                </div>
+              @endforeach
+            </div>
+
+            @error('fabricColorRows')<div class="mt-3 text-sm text-red-500">{{ $message }}</div>@enderror
+          </div>
+
+          @if($this->measurementFields()->isNotEmpty())
+            <div class="mt-6 p-4 bg-layer border border-layer-line rounded-xl">
+              <h3 class="text-base font-semibold text-foreground mb-4">Measurements</h3>
+              <div class="grid gap-4 sm:grid-cols-2">
+                @foreach($this->measurementFields() as $field)
+                  <div>
+                    <label class="block mb-2 text-sm font-medium text-foreground">{{ $field->field_name }} ({{ $field->unit }})</label>
+                    <input wire:model.defer="values.{{ $field->id }}" type="text"
+                      class="py-2.5 sm:py-3 px-4 block w-full bg-layer border-layer-line rounded-lg sm:text-sm text-foreground placeholder:text-muted-foreground-1 focus:border-primary-focus focus:ring-primary-focus"
+                      placeholder="Enter {{ strtolower($field->field_name) }}">
+                    @error('values.' . $field->id)<span class="text-sm text-red-500">{{ $message }}</span>@enderror
+                  </div>
+                @endforeach
+              </div>
+            </div>
+          @endif
+
+          <div class="mt-6">
+            <label class="block mb-2 text-sm font-medium text-foreground">Description</label>
+            <textarea wire:model="description" rows="4"
+              class="py-2.5 sm:py-3 px-4 block w-full bg-layer border-layer-line rounded-lg sm:text-sm text-foreground placeholder:text-muted-foreground-1 focus:border-primary-focus focus:ring-primary-focus"
+              placeholder="Enter garment description"></textarea>
+            @error('description')<span class="text-sm text-red-500">{{ $message }}</span>@enderror
+          </div>
+
+          <div class="mt-8 grid">
+            <button type="submit"
+              class="w-full py-3 px-4 inline-flex justify-center items-center gap-x-2 text-sm font-medium rounded-lg bg-primary border border-primary-line text-primary-foreground hover:bg-primary-hover focus:outline-hidden focus:bg-primary-focus">
+              Update Garment
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
